@@ -57,11 +57,17 @@ def create_synthetic_landscape():
     return Image.fromarray(patch)
 
 def load_local_sample():
-    # Recursively checking for physical baseline datasets
-    tif_files = glob.glob("chennai*.tif") + glob.glob("*.tif")
-    if tif_files:
-        return np.array(Image.open(tif_files[0]).convert("RGB"))
-    return np.array(create_synthetic_landscape().convert("RGB"))
+    """Load the real cloudy Sentinel-2 image for the sample button."""
+    try:
+        # Load your real cloudy image from the project folder
+        img = Image.open("chennai_s2_cloudy_2026-02-13.tif")
+        # Resize to 1024x1024 for fast processing on Azure
+        img = img.resize((1024, 1024))
+        return np.array(img.convert("RGB"))
+    except Exception as e:
+        st.warning(f"Could not load real sample image: {e}")
+        # Fallback synthetic image
+        return np.array(create_synthetic_landscape().convert("RGB"))
 
 # --- Session Router ---
 if "test_mode" not in st.session_state:
