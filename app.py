@@ -11,6 +11,7 @@ import model
 Image.MAX_IMAGE_PIXELS = None
 
 st.set_page_config(layout="wide", page_title="ClearCoast AI", page_icon="🌊")
+st._config.set_option("server.maxUploadSize", 500)
 
 # --- Custom Styling for Premium Lightweight Dashboard ---
 st.markdown("""
