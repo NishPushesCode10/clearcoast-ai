@@ -33,7 +33,7 @@ resource "azurerm_storage_container" "container" {
   container_access_type = "private"
 }
 
-# Azure Functions Plan
+# Azure Functions Plan (Consumption)
 resource "azurerm_service_plan" "plan" {
   name                = "coastal-plan"
   resource_group_name = azurerm_resource_group.rg.name
