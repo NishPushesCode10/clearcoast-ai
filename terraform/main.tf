@@ -12,25 +12,25 @@ provider "azurerm" {
   resource_provider_registrations = "none"
 }
 
-# Reference existing Resource Group
+# Use existing Resource Group
 data "azurerm_resource_group" "rg" {
   name = "rg-chennai-coastal"
 }
 
-# Reference existing Storage Account
+# Use existing Storage Account
 data "azurerm_storage_account" "storage" {
   name                = "coastaltiles"
   resource_group_name = data.azurerm_resource_group.rg.name
 }
 
-# Blob Container
+# Blob Container (only create if it doesn't exist)
 resource "azurerm_storage_container" "container" {
   name                  = "coastal-tiles"
   storage_account_id    = data.azurerm_storage_account.storage.id
   container_access_type = "private"
 }
 
-# Azure Functions Plan
+# Azure Functions Plan (only create if it doesn't exist)
 resource "azurerm_service_plan" "plan" {
   name                = "coastal-plan"
   resource_group_name = data.azurerm_resource_group.rg.name
