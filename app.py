@@ -1,3 +1,5 @@
+
+
 import streamlit as st
 import numpy as np
 from PIL import Image
@@ -144,3 +146,57 @@ st.markdown("<div class='footer'>Extremely Fast, Lightweight, Azure-Ready Stream
 
 
 # Updated for Review II again
+# === AZURE OPENAI INTEGRATION (GenAI for Review II) ===
+import os
+from openai import AzureOpenAI
+
+# Secure way - Read key from environment variable (set in Azure App Service)
+client = AzureOpenAI(
+    azure_endpoint="https://23070-mohb8gig-eastus2.cognitiveservices.azure.com/",
+    api_key=os.getenv("AZURE_OPENAI_KEY"),   # Set this in Azure Configuration
+    api_version="2025-01-01-preview"
+)
+
+# GenAI Section - Only show after image processing
+if 'out_img_np' in locals() or 'dynamic_alerts' in locals():
+    st.markdown("---")
+    st.subheader("🤖 GenAI Coastal Insights")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("📊 Generate AI Report"):
+            with st.spinner("Analyzing image and generating professional report..."):
+                prompt = f"""
+                You are a coastal monitoring expert for Tamil Nadu.
+                Analyze the following processed satellite image:
+                - NDVI-based alerts: {dynamic_alerts if 'dynamic_alerts' in locals() else 'No alerts available'}
+                - Average confidence score: {conf_map.mean() if 'conf_map' in locals() else 0.75:.2f}
+                
+                Provide a short, professional report suitable for coastal authorities.
+                """
+
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    max_tokens=300
+                )
+                st.success("**AI Generated Report:**")
+                st.write(response.choices[0].message.content)
+
+    with col2:
+        st.subheader("💬 Ask About the Coast")
+        user_question = st.text_input("Ask any question about the current image...")
+        if user_question:
+            with st.spinner("Thinking..."):
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "You are an expert on Tamil Nadu coastal monitoring."},
+                        {"role": "user", "content": user_question}
+                    ]
+                )
+                st.write(response.choices[0].message.content)
+else:
+    st.info("Process an image first to unlock GenAI features.")
