@@ -3,4 +3,4 @@ pillow
 numpy
 opencv-python-headless
 matplotlib
-openai
+
