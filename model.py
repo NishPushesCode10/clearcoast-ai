@@ -1,107 +1,124 @@
 import numpy as np
 import cv2
-import math
 
 class GeneralCloudRemover:
     """
-    Advanced Multi-Scale Simulation incorporating intelligent HSV+Variance cloud isolation,
-    adaptive localized Dehazing, highly targeted Telea inpainting avoiding land smudging,
-    and terrestrial color corrections to perfectly hallucinate clean geographies smoothly.
+    Advanced multi-stage cloud removal and hallucination pipeline optimized for 
+    Sentinel-2 coastal imagery. Uses intelligent HSV+Edge detection for masks,
+    Navier-Stokes inpainting, Bilateral edge-preserving smoothing, and LAB-based 
+    CLAHE for incredibly natural contrast and color correction.
     """
     def process(self, img_array):
-        # Base Conversions
+        # 1. Base Conversions
         img_float = img_array.astype(np.float32) / 255.0
-        hsv = cv2.cvtColor(img_array.astype(np.uint8), cv2.COLOR_RGB2HSV)
-        h = hsv[:, :, 0].astype(np.float32)
-        s = hsv[:, :, 1].astype(np.float32) / 255.0
-        v = hsv[:, :, 2].astype(np.float32) / 255.0
+        hsv = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
+        h, s, v = cv2.split(hsv)
         
-        # 1. Intelligent Cloud Detection (Brightness + Saturation + Local Variance)
-        # Calculate local variance of brightness to distinguish clouds from bright sand/urban areas
-        v_blur = cv2.GaussianBlur(v, (11, 11), 0)
-        v_std = np.sqrt(cv2.GaussianBlur((v - v_blur)**2, (11, 11), 0) + 1e-6)
+        s_float = s.astype(np.float32) / 255.0
+        v_float = v.astype(np.float32) / 255.0
         
-        # Clouds are intensely bright, have low color saturation, and have smoother internal variance than cities
-        heavy_cloud = (v > 0.85) & (s < 0.25) & (v_std < 0.15)
-        moderate_cloud = (v > 0.65) & (s < 0.40)
+        # 2. Highly Accurate Cloud Detection (Brightness + Saturation + Edges)
+        # Clouds: Bright (high V), low saturation (low S), and lack sharp textures inside
         
-        # 2. Adaptive Dehazing (DCP)
-        dark_channel = cv2.erode(np.min(img_float, axis=2), np.ones((7, 7))) 
-        # Smooth the dark channel broadly to prevent blocky artifacts
+        # Edge magnitude using Sobel to avoid detecting bright buildings/roads as clouds
+        sobelx = cv2.Sobel(v_float, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(v_float, cv2.CV_64F, 0, 1, ksize=3)
+        edge_mag = np.sqrt(sobelx**2 + sobely**2)
+        edge_mag = cv2.GaussianBlur(edge_mag, (5, 5), 0)
+        
+        # Refined cloud masks
+        # Heavy clouds: very bright, very low saturation, not an edge
+        heavy_cloud = (v_float > 0.75) & (s_float < 0.3) & (edge_mag < 0.15)
+        
+        # Moderate clouds (thin clouds / cloud edges)
+        moderate_cloud = (v_float > 0.60) & (s_float < 0.45) & (edge_mag < 0.25)
+        
+        heavy_cloud_uint8 = (heavy_cloud * 255).astype(np.uint8)
+        
+        # Grow the heavy cloud mask slightly to cover soft cloud edges during inpainting
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        heavy_cloud_mask = cv2.dilate(heavy_cloud_uint8, kernel, iterations=2)
+        
+        # 3. Adaptive Dehazing (DCP - Dark Channel Prior)
+        # Helps remove thin haze before inpainting
+        dark_channel = cv2.erode(np.min(img_float, axis=2), np.ones((15, 15))) 
         dark_channel = cv2.GaussianBlur(dark_channel, (31, 31), 0) 
         
         flat_dark = dark_channel.reshape(-1)
         flat_img = img_float.reshape(-1, 3)
         num_pixels = max(int(len(flat_dark) * 0.001), 1)
         
+        # Atmospheric light
         indices = np.argpartition(flat_dark, -num_pixels)[-num_pixels:]
         A = np.mean(flat_img[indices], axis=0)
-        A = np.clip(A, 0.4, 1.0)
+        A = np.clip(A, 0.6, 1.0) # Restrict to avoid aggressive color shifts
         
-        # Transmission map (Backed off omega to 0.85 to prevent over-darkening artifacts)
-        t = 1.0 - 0.85 * (dark_channel / np.max(A))
-        t = np.clip(t, 0.1, 1.0)
+        # Transmission map
+        t = 1.0 - 0.75 * (dark_channel / np.max(A)) # Moderate omega (0.75)
+        t = np.clip(t, 0.2, 1.0) # Prevent dividing by near-zero
         
         dehazed = (img_float - A) / np.expand_dims(t, 2) + A
         dehazed = np.clip(dehazed, 0, 1)
         dehazed_uint8 = (dehazed * 255).astype(np.uint8)
         
-        # 3. Targeted TELEA Inpainting (Hallucination)
-        heavy_cloud_uint8 = (heavy_cloud * 255).astype(np.uint8)
-        # Only slight dilation (iterations=1) to prevent the inpaint from eating into valid surrounding geography
-        heavy_cloud_mask = cv2.dilate(heavy_cloud_uint8, np.ones((5, 5), np.uint8), iterations=1)
-        
+        # 4. Navier-Stokes Inpainting (More realistic structural hallucination than Telea)
         if np.sum(heavy_cloud_mask) > 0:
-            # Radius 5 provides natural filling without excessive smudging/blurring of landmasses
-            inpainted = cv2.inpaint(dehazed_uint8, heavy_cloud_mask, 5, cv2.INPAINT_TELEA)
+            # radius 7 for smoother integration
+            inpainted = cv2.inpaint(dehazed_uint8, heavy_cloud_mask, 7, cv2.INPAINT_NS)
         else:
             inpainted = dehazed_uint8
             
-        # 4. Multi-Scale Detail Enhancement (Fixing inherent inpainting and dehazing softness)
-        # Scale 1: Fine micro-textures (buildings, ripples)
-        blur1 = cv2.GaussianBlur(inpainted, (3, 3), 1.0)
-        sharp1 = cv2.addWeighted(inpainted, 1.5, blur1, -0.5, 0) # Gentle, non-aggressive sharpening
+        # 5. Advanced Edge-Preserving Sharpening
+        # Instead of generic blur that smudges coastlines, we use Bilateral Filter
+        # which blurs while keeping edges perfectly sharp.
+        smoothed = cv2.bilateralFilter(inpainted, d=9, sigmaColor=50, sigmaSpace=50)
         
-        # Scale 2: Medium biological structures / contrast
-        blur2 = cv2.GaussianBlur(sharp1, (9, 9), 2.0)
-        sharp2 = cv2.addWeighted(sharp1, 1.2, blur2, -0.2, 0) 
+        # Unsharp masking: Image + (Image - Smoothed) * amount
+        # This enhances details (coastlines, buildings) without adding noise
+        sharp = cv2.addWeighted(inpainted, 1.5, smoothed, -0.5, 0)
         
-        # 5. Gentle Coastal Color Correction
-        final_hsv = cv2.cvtColor(sharp2, cv2.COLOR_RGB2HSV).astype(np.float32)
-        final_h, final_s, final_v = cv2.split(final_hsv)
+        # 6. Professional Color Correction (LAB space CLAHE)
+        # LAB space separates luminosity (L) from color (A, B) preventing hue shifts
+        lab = cv2.cvtColor(sharp, cv2.COLOR_RGB2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
         
-        # Natural broad saturation lift
-        final_s = final_s * 1.15 
+        # Apply Contrast Limited Adaptive Histogram Equalization to L-channel
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        cl = clahe.apply(l_channel)
         
-        # Deep Water (Gentle blue restoration)
-        water_mask = (final_h > 90) & (final_h < 135)
-        final_v[water_mask] = final_v[water_mask] * 0.90 
-        final_s[water_mask] = final_s[water_mask] * 1.20
+        # Merge back
+        merged_lab = cv2.merge((cl, a_channel, b_channel))
+        final_img = cv2.cvtColor(merged_lab, cv2.COLOR_LAB2RGB)
         
-        # Landmass (Gentle green/brown warmth)
-        land_mask = (final_h > 20) & (final_h < 85)
-        final_s[land_mask] = final_s[land_mask] * 1.10
-        
-        final_hsv[:,:,1] = np.clip(final_s, 0, 255)
-        final_hsv[:,:,2] = np.clip(final_v, 0, 255)
-        
+        # Vibrant saturation boost (Gentle)
+        final_hsv = cv2.cvtColor(final_img, cv2.COLOR_RGB2HSV).astype(np.float32)
+        final_hsv[:, :, 1] = np.clip(final_hsv[:, :, 1] * 1.15, 0, 255)
         final_img = cv2.cvtColor(final_hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
         
-        # 6. Improved organic Confidence Map classification
-        conf_map = np.ones(v.shape, dtype=np.float32)
-        conf_map[moderate_cloud] = 0.5 # Orange
-        conf_map[heavy_cloud_mask > 0] = 0.0 # Red
-        # Smooth organic gradient
-        conf_map = cv2.GaussianBlur(conf_map, (31, 31), 0)
+        # 7. Smooth, Accurate Confidence Map
+        conf_map = np.ones(v.shape, dtype=np.float32) # Default 1.0 (Green/Real)
+        conf_map[moderate_cloud] = 0.5 # Orange (Thin clouds / partially real)
+        conf_map[heavy_cloud_mask > 0] = 0.0 # Red (Fully Hallucinated)
         
-        # 7. Alerts
+        # Extremely smooth gradient for natural heatmap visualization
+        conf_map = cv2.GaussianBlur(conf_map, (51, 51), 0)
+        
+        # 8. Dynamic Contextual Alerts
         alerts = []
+        # Use hue to detect terrain types
+        final_h = final_hsv[:, :, 0]
+        water_mask = (final_h > 90) & (final_h < 135)
+        land_mask = (final_h > 20) & (final_h < 85)
+        
+        if np.sum(heavy_cloud_mask) > 0:
+            pct = (np.sum(heavy_cloud_mask > 0) / heavy_cloud_mask.size) * 100
+            alerts.append(f"☁️ {pct:.1f}% Severe Cloud Cover Hallucinated")
         if np.mean(land_mask) > 0.05:
-            alerts.append("High Vegetation Detected 🌿")
+            alerts.append("🌿 Dense Vegetation / Mangroves Detected")
         if np.mean(water_mask) > 0.10:
-            alerts.append("Coastal/Water Body 🌊")
+            alerts.append("🌊 Coastal Water Body Extracted")
         if len(alerts) == 0:
-            alerts.append("Urban/Barren Area Clear 🏙️")
+            alerts.append("🏙️ Urban / Barren Geography Isolated")
             
         return final_img, conf_map, alerts
 
